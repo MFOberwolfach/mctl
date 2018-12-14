@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+'''mctl - MiMa Control Script'''
+
+import argparse, configparser, datetime, os, os.path, re, subprocess, sys, tempfile, time
+from collections import OrderedDict
+from pathlib import Path
+
+basedir = os.path.expanduser('~/mctl')
+
+
+####################################################################
+## read configuration
+####################################################################
+config = configparser.ConfigParser()
+config.read_file(open(os.path.join(basedir, 'etc/config.ini')))
+hosts_config = configparser.ConfigParser()
+hosts_config.read_file(open(os.path.join(basedir, 'etc/hosts.ini')))
+
+
+####################################################################
+## functions and classes
+####################################################################
+def log(text, par = True):
+  text = 'mctl: ' + text + '\n'
+  if par:
+    text = '\n' + text
+  sys.stdout.write(text)
+  
+log('Beginning of MiMa Control Script')
+
+class Config:
+  def __init__(self, section, items):
+    for key, value in items:
+      if section == 'durations':
+        setattr(self, key, int(value))
+      elif section == 'paths':
+        setattr(self, key, os.path.join(basedir, value))
+      else:
+        setattr(self, key, value)
+  
+for key in config.defaults():
+  setattr(Config, key, config['DEFAULT'][key])
+section = 'durations'
+durations = Config(section, config.items(section))
+section = 'paths'
+paths = Config(section, config.items(section))
+section = 'pdu'
+pdu = Config(section, config.items(section))
+
+re_comma = re.compile(' *, *')
+class Host:
+  _attributes = []
+  _instances = []
+  names = []
+  def __init__(self, name, items):
+    if name in Host.names:
+      log('Error: Host names must be unique, exiting ...')
+      sys.exit(1)
+    else:
+      self.name = name
+      self.preferred_name = name
+      self.all_names = [name,]
+      self.names.append(name)
+    self._instances.append(self)
+    self._attributes = ['name', 'all_names']
+    for key, value in items:
+      if key == 'alternative names':
+        self.all_names.extend(re.split(re_comma, value))
+      else:
+        setattr(self, key, value)
+        self._attributes.append(key)
+    self.script = ''
+  def show(self):
+    print('\n' + self.preferred_name)
+    for a in self._attributes:
+      if a == 'all_names':
+        print('  {:15}: {}'.format(a, ', '.join(getattr(self, a))))
+      else:
+        print('  {:15}: {}'.format(a, getattr(self, a)))
+  def addline(self,line):
+    self.script += line + '\n'
+  def lock(self, direction):
+    self.addline('echo "setting {} lock for {} ..."'.format(direction, self.preferred_name))
+    self.addline('touch {}.{}'.format(os.path.join(paths.lockdir, self.name), direction))
+  def unlock(self, direction):
+    self.addline('echo "removing {} lock for {} ..."'.format(direction, self.preferred_name))
+    self.addline('rm {}.{}'.format(os.path.join(paths.lockdir, self.name), direction))
+  def pdu(self):
+    if 'pdu_id' in self._attributes:
+      self.addline('echo "pdu status for {} ..."'.format(self.preferred_name))
+      self.addline('snmpget -O qv -v 3 -a MD5 -A {0} -l authPriv -u pdu1 -x DES -X {0} {1} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{2}'.format(pdu.password,pdu.ip,self.pdu_id))
+      self.addline('echo "1 means on, 2 means off"')
+    else:
+      self.addline('echo "skipping pdu status for {}, as it is unconneted to pdu ..."'.format(self.preferred_name))
+  def ping(self):
+    self.addline('echo "pinging {} ..."'.format(self.preferred_name))
+    self.addline('ping -c 1 {}'.format(self.ip))  
+  def uptime(self):
+    self.addline('echo "uptime of {} ..."'.format(self.preferred_name))
+    self.addline('ssh -f -i {} {}@{} {}'.format(paths.keyfile, self.user, self.ip, self.uptime_cmd))
+  def pdu_on(self):
+    if 'pdu_id' in self._attributes:
+      self.addline('echo "asserting \'pdu on\' for {} ..."'.format(self.preferred_name))
+      self.addline('snmpset -O qv -v 3 -a MD5 -A {0} -l authPriv -u pdu1 -x DES -X {0} {1} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{2} i 1'.format(pdu.password,pdu.ip,self.pdu_id))
+      self.sleep(durations.pause)
+    else:
+      self.addline('echo "skipping \'pdu on\' for {}, as it is unconneted to pdu ..."'.format(self.preferred_name))
+  def wol(self):
+    self.addline('echo "waking up {} ..."'.format(self.preferred_name))
+    self.addline('{} {}'.format(self.wol_cmd, self.mac))
+    self.sleep(durations.boot)
+  def shutdown(self):
+    self.addline('echo "shutting down {} ..."'.format(self.preferred_name))
+    self.addline('ssh -f -i {} {}@{} {}'.format(paths.keyfile, self.user, self.ip, self.shutdown_cmd))  
+    self.sleep(durations.shutdown)
+  def pdu_off(self):
+    if 'pdu_id' in self._attributes:
+      self.addline('echo "asserting \'pdu off\' for {} ..."'.format(self.preferred_name))
+      self.addline('snmpset -O qv -v 3 -a MD5 -A {0} -l authPriv -u pdu1 -x DES -X {0} {1} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{2} i 2'.format(pdu.password,pdu.ip,self.pdu_id))
+      self.sleep(durations.power_disruption)
+    else:
+      self.addline('echo "skipping \'pdu off\' for {}, as it is unconneted to pdu ..."'.format(self.preferred_name))
+  def sleep(self,seconds):
+    self.addline('echo "sleeping {} seconds ..."'.format(seconds,))
+    self.addline('sleep {}'.format(seconds,))
+
+for key in hosts_config.defaults():
+  setattr(Host, key, hosts_config['DEFAULT'][key])
+  Host._attributes.append(key)
+for section in hosts_config.sections():
+  Host(section, hosts_config.items(section))
+
+def lock(hn, direction):
+  Path(os.path.join(paths.lockdir, hn) + '.' + direction).touch()   
+  
+def unlocked(hn, direction):
+  lockfile = os.path.join(paths.lockdir, hn) + '.' + direction
+  try:
+    locktime = datetime.datetime.fromtimestamp(os.path.getmtime(lockfile))
+  except FileNotFoundError:
+    return True
+  if (datetime.datetime.now() - locktime).total_seconds() > durations.lock:
+    return True
+  else:
+    return False
+
+
+####################################################################
+## parse command line
+####################################################################
+actions = OrderedDict([
+  ('show',     'show host and action definitions'),
+  ('status',   'show host pdu, ping and uptime status'),
+  ('start',    'connect host to power and boot host'),
+  ('shutdown', 'shutdown host regularly by a software command'),
+  ('poweroff', 'like shutdown, but disconnect from power afterwards'),
+  ('fix',      'like poweroff followed by start. This will get a hanging host back to work.')
+])
+
+parser = argparse.ArgumentParser(
+  description = 'This is mctl - the MiMa Control Script.',
+)
+parser.add_argument(
+  'action',
+  help = '''one action to execute from the following list: {}. The
+  word may be abbreviated. The match is done
+  case-insensitive. Type 'mctl show all' for further
+  information'''.format(', '.join(actions.keys())),
+)
+all_host_names = 'all, ' + ', '.join([', '.join(h.all_names) for h in Host._instances])
+parser.add_argument(
+  'host',
+  nargs = '+',
+  help = """host to execute the action on. A possibly
+  abbreviated first word from the folling list: {}. The special
+  word 'all' means all hosts. The match is done
+  case-insensitive.""".format(all_host_names),
+)
+args = parser.parse_args()
+
+## determine action
+re_nonalphanumeric = re.compile('[\W_]+', re.UNICODE)
+a2 = re_nonalphanumeric.sub('', args.action.casefold())
+hits = 0
+for a in actions.keys():
+  if re.match(a2, a):
+    action = a
+    hits += 1
+if not hits == 1:
+  log('Error: first command line argument \'{}\' doesn\'t match exactly one action, exiting ...'.format(a2), par = False)
+  sys.exit(1)
+
+## determine hosts
+hosts = []
+for ah in args.host:
+  ah2 = re_nonalphanumeric.sub('', ah.casefold())
+  hits = 0
+  if re.match(ah2, 'all', flags=re.IGNORECASE):
+    hits += 1
+    hosts = [h.name for h in Host._instances]
+  for h in Host._instances:
+    for n in h.all_names:
+      if re.match(ah2, n, flags=re.IGNORECASE):
+        hosts.append(h.name)
+        h.preferred_name = n
+        hits += 1
+        break
+  if not hits == 1:
+    log('Error: command line argument "{}" neither matches exactly one host nor the word \'all\', exiting ...'.format(ah), par = False)
+    sys.exit(1)
+hosts = list(OrderedDict.fromkeys(hosts))
+
+
+####################################################################
+## compose scripts
+####################################################################
+u = 'upwards'
+d = 'downwards'
+for h in Host._instances:
+  for hn in hosts:
+    if hn == h.name:
+      h.addline('echo "Beginning of \'{}\' for host \'{}\':"'.format(action, h.preferred_name))
+      if action == 'show':
+        h.show()
+      elif action == 'status':
+        h.pdu()
+        h.ping()
+        h.uptime()
+      elif action == 'start':
+        if unlocked(hn, d):
+          h.lock(u)
+          h.pdu_on()
+          h.wol()
+          h.unlock(u)
+        else:
+          log('skipping \'{}\' for \'{}\' due to {} lock'.format(action, h.preferred_name, d))
+      elif action == 'shutdown':
+        if unlocked(hn, u):
+          h.lock(d)
+          h.shutdown()
+          h.unlock(d)
+        else:
+          log('skipping \'{}\' for \'{}\' due to {} lock'.format(action, h.preferred_name, u))
+      elif action == 'poweroff':
+        if unlocked(hn, u):
+          h.lock(d)
+          h.shutdown()
+          h.pdu_off()
+          h.unlock(d)
+        else:
+          log('skipping \'{}\' for \'{}\' due to {} lock'.format(action, h.preferred_name, u))
+      elif action == 'fix':
+        if unlocked(hn, u) and unlocked(hn, d):
+          h.lock(d)
+          h.shutdown()
+          h.pdu_off()
+          h.unlock(d)
+          h.lock(u)
+          h.pdu_on()
+          h.wol()
+          h.unlock(u)
+        else:
+          log('skipping \'{}\' for \'{}\' due to lock'.format(action, h.preferred_name))
+      else:
+        log('Error: forgotten action, exiting ...')
+        sys.exit(1)
+      h.addline('echo "End of \'{}\' for host \'{}\'."'.format(action, h.preferred_name))
+
+  
+####################################################################
+## execute scripts
+####################################################################
+if action == 'show':
+  print('\navailable actions:')
+  for key, value in actions.items():
+    print('  {:15}: {}'.format(key, value))
+  log('End of MiMa Control Script')
+  sys.exit(0)
+
+f = dict()   # temporary files for input and output
+p = dict()   # script processes
+j = 0        # script's serial number
+for h in Host._instances:
+  for hn in hosts:
+    if hn == h.name:
+      f[j] = tempfile.TemporaryFile(mode = 'w+b')
+#      print(h.script)
+      p[j] = subprocess.Popen(h.script, stdout = f[j], stderr = f[j], shell = True)
+      time.sleep(durations.pause)
+      j += 1
+
+
+####################################################################
+## print output
+####################################################################
+for k in range(j):
+  print('')
+  p[k].wait()
+  f[k].seek(0)
+  print(f[k].read().decode('UTF-8'))
+
+log('End of MiMa Control Script')

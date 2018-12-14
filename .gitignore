@@ -1,0 +1,4 @@
+*.ini
+*.pyc
+etc/*id_rsa*
+lock/*
