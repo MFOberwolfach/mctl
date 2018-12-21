@@ -110,6 +110,11 @@ class Host:
     self.addline('echo "waking up {} ..."'.format(self.preferred_name))
     self.addline('{} {}'.format(self.wol_cmd, self.mac))
     self.sleep(durations.boot)
+  def reboot(self):
+    self.addline('echo "rebooting {} ..."'.format(self.preferred_name))
+    self.addline('ssh -f -i {} {}@{} {}'.format(paths.keyfile, self.user, self.ip, self.reboot_cmd))  
+    self.sleep(durations.shutdown)
+    self.sleep(durations.boot)
   def shutdown(self):
     self.addline('echo "shutting down {} ..."'.format(self.preferred_name))
     self.addline('ssh -f -i {} {}@{} {}'.format(paths.keyfile, self.user, self.ip, self.shutdown_cmd))  
@@ -153,6 +158,7 @@ actions = OrderedDict([
   ('show',     'show host and action definitions'),
   ('status',   'show host pdu, ping and uptime status'),
   ('start',    'connect host to power and boot host'),
+  ('reboot',   'reboot host regularly by a software command'),
   ('shutdown', 'shutdown host regularly by a software command'),
   ('poweroff', 'like shutdown, but disconnect from power afterwards'),
   ('fix',      'like poweroff followed by start. This will get a hanging host back to work.')
@@ -235,6 +241,15 @@ for h in Host._instances:
           h.unlock(u)
         else:
           log('skipping \'{}\' for \'{}\' due to {} lock'.format(action, h.preferred_name, d))
+      elif action == 'reboot':
+        if unlocked(hn, d) and unlocked(hn, u):
+          h.lock(d)
+          h.lock(u)
+          h.reboot()
+          h.unlock(d)
+          h.unlock(u)
+        else:
+          log('skipping \'{}\' for \'{}\' due to {} or {} lock'.format(action, h.preferred_name, d, u))
       elif action == 'shutdown':
         if unlocked(hn, u):
           h.lock(d)
