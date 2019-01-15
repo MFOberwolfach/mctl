@@ -6,6 +6,7 @@ import argparse, configparser, datetime, os, os.path, re, subprocess, sys, tempf
 from collections import OrderedDict
 from pathlib import Path
 
+__version__ = '0.2'
 basedir = os.path.expanduser('~/mctl')
 
 
@@ -14,6 +15,8 @@ basedir = os.path.expanduser('~/mctl')
 ####################################################################
 config = configparser.ConfigParser()
 config.read_file(open(os.path.join(basedir, 'etc/config.ini')))
+pdus_config = configparser.ConfigParser()
+pdus_config.read_file(open(os.path.join(basedir, 'etc/pdus.ini')))
 hosts_config = configparser.ConfigParser()
 hosts_config.read_file(open(os.path.join(basedir, 'etc/hosts.ini')))
 
@@ -21,131 +24,146 @@ hosts_config.read_file(open(os.path.join(basedir, 'etc/hosts.ini')))
 ####################################################################
 ## functions and classes
 ####################################################################
-def log(text, par = True):
-  text = 'mctl: ' + text + '\n'
-  if par:
-    text = '\n' + text
-  sys.stdout.write(text)
-  
-log('Beginning of MiMa Control Script')
+def log(text, prepend = '\n'):
+  sys.stdout.write(prepend + 'mctl: ' + text + '\n')
+
+def dlog(text, prepend = '\n'):
+  if args.debug:
+    sys.stdout.write(prepend + 'mctl' + args.debug + ': ' + text + '\n')
 
 class Config:
   def __init__(self, section, items):
     for key, value in items:
       if section == 'durations':
         setattr(self, key, int(value))
-      elif section == 'paths':
+      elif section == 'paths' and not os.path.isabs(value):
         setattr(self, key, os.path.join(basedir, value))
       else:
         setattr(self, key, value)
   
-for key in config.defaults():
-  setattr(Config, key, config['DEFAULT'][key])
-section = 'durations'
-durations = Config(section, config.items(section))
-section = 'paths'
-paths = Config(section, config.items(section))
-section = 'pdu'
-pdu = Config(section, config.items(section))
+c = dict()
+for section in config.sections():
+  c[section] = Config(section, config.items(section))
+
+# note the difference:
+# Pdu = class
+# pdu = dictionary of all Pdu objects
+# h.pdu = pdu attribute of host h
+# pdus = list of pdunames of the hosts given on the command line
+class Pdu:
+  _attributes = []
+  def __init__(self, section, items):
+    for key, value in items:
+      setattr(self, key, value)
+      if not key in self._attributes:
+        self._attributes.append(key)
+
+pdu = dict()
+for section in pdus_config.sections():
+  pdu[section] = Pdu(section, pdus_config.items(section))
 
 re_comma = re.compile(' *, *')
+item_template = '    {:17}: {}'
+# note the difference:
+# Host = class
+# host = dictionary of all Host objects
+# hosts = list of hostnames of the hosts given on the command line
 class Host:
   _attributes = []
   _instances = []
   names = []
   def __init__(self, name, items):
-    if name in Host.names:
-      log('Error: Host names must be unique, exiting ...')
-      sys.exit(1)
-    else:
-      self.name = name
-      self.preferred_name = name
-      self.all_names = [name,]
-      self.names.append(name)
+    self.name = name
+    self.preferred_name = name
+    self.all_names = [name,]
+    self.names.append(name)
     self._instances.append(self)
     self._attributes = ['name', 'all_names']
     for key, value in items:
+      if key == 'pdu': 
+        if not value in pdus_config.sections():
+          log('error: there is no pdu called \'{}\', aborting ... '.format(value))
+          sys.exit(1)
       if key == 'alternative names':
         self.all_names.extend(re.split(re_comma, value))
       else:
         setattr(self, key, value)
-        self._attributes.append(key)
+        if not key in self._attributes:
+          self._attributes.append(key)
     self.script = ''
-  def show(self):
-    print('\n' + self.preferred_name)
-    for a in self._attributes:
-      if a == 'all_names':
-        print('  {:15}: {}'.format(a, ', '.join(getattr(self, a))))
-      else:
-        print('  {:15}: {}'.format(a, getattr(self, a)))
   def addline(self,line):
     self.script += line + '\n'
+  def boot(self):
+    self.addline('echo "waking up {} ..."'.format(self.preferred_name))
+    self.addline('{} {}'.format(self.boot_cmd, self.mac))
+    self.sleep(self.boot_duration)
   def lock(self, direction):
     self.addline('echo "setting {} lock for {} ..."'.format(direction, self.preferred_name))
-    self.addline('touch {}.{}'.format(os.path.join(paths.lockdir, self.name), direction))
-  def unlock(self, direction):
-    self.addline('echo "removing {} lock for {} ..."'.format(direction, self.preferred_name))
-    self.addline('rm {}.{}'.format(os.path.join(paths.lockdir, self.name), direction))
-  def pdu(self):
-    if 'pdu_id' in self._attributes:
-      self.addline('echo "pdu status for {} ..."'.format(self.preferred_name))
-      self.addline('snmpget -O qv -v 3 -a MD5 -A {0} -l authPriv -u pdu1 -x DES -X {0} {1} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{2}'.format(pdu.password,pdu.ip,self.pdu_id))
-      self.addline('echo "1 means on, 2 means off"')
+    self.addline('touch {}.{}'.format(os.path.join(c['paths'].lockdir, self.name), direction))
+  def outlet_off(self):
+    if 'outlet' in self._attributes:
+      self.addline('echo "asserting \'outlet off\' for {} ..."'.format(self.preferred_name))
+      self.addline(pdu[self.pdu].off_cmd.format(pdu[self.pdu].auth_password, pdu[self.pdu].priv_password, pdu[self.pdu].ip, self.outlet))
+      self.sleep(self.power_disruption)
     else:
-      self.addline('echo "skipping pdu status for {}, as it is unconneted to pdu ..."'.format(self.preferred_name))
+      self.addline('echo "skipping \'outlet off\' for {}, as it is unconneted to pdu ..."'.format(self.preferred_name))
+  def outlet_on(self):
+    if 'outlet' in self._attributes:
+      self.addline('echo "asserting \'outlet on\' for {} ..."'.format(self.preferred_name))
+      self.addline(pdu[self.pdu].on_cmd.format(pdu[self.pdu].auth_password, pdu[self.pdu].priv_password, pdu[self.pdu].ip, self.outlet))
+      self.sleep(c['durations'].pause)
+    else:
+      self.addline('echo "skipping \'outlet on\' for {}, as it is unconneted to pdu ..."'.format(self.preferred_name))
+  def outlet_status(self):
+    if 'outlet' in self._attributes:
+      self.addline('echo "outlet status for {} ..."'.format(self.preferred_name))
+      self.addline(pdu[self.pdu].status_cmd.format(pdu[self.pdu].auth_password, pdu[self.pdu].priv_password, pdu[self.pdu].ip, self.outlet))
+      self.addline('echo "1 means on, 0 or 2 means off"')
+    else:
+      self.addline('echo "skipping outlet status for {}, as it is unconneted to pdu ..."'.format(self.preferred_name))
   def ping(self):
     self.addline('echo "pinging {} ..."'.format(self.preferred_name))
     self.addline('ping -c 1 {}'.format(self.ip))  
-  def uptime(self):
-    self.addline('echo "uptime of {} ..."'.format(self.preferred_name))
-    self.addline('ssh -f -i {} {}@{} {}'.format(paths.keyfile, self.user, self.ip, self.uptime_cmd))
-  def pdu_on(self):
-    if 'pdu_id' in self._attributes:
-      self.addline('echo "asserting \'pdu on\' for {} ..."'.format(self.preferred_name))
-      self.addline('snmpset -O qv -v 3 -a MD5 -A {0} -l authPriv -u pdu1 -x DES -X {0} {1} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{2} i 1'.format(pdu.password,pdu.ip,self.pdu_id))
-      self.sleep(durations.pause)
-    else:
-      self.addline('echo "skipping \'pdu on\' for {}, as it is unconneted to pdu ..."'.format(self.preferred_name))
-  def wol(self):
-    self.addline('echo "waking up {} ..."'.format(self.preferred_name))
-    self.addline('{} {}'.format(self.wol_cmd, self.mac))
-    self.sleep(durations.boot)
   def reboot(self):
     self.addline('echo "rebooting {} ..."'.format(self.preferred_name))
-    self.addline('ssh -f -i {} {}@{} {}'.format(paths.keyfile, self.user, self.ip, self.reboot_cmd))  
-    self.sleep(durations.shutdown)
-    self.sleep(durations.boot)
+    self.addline('ssh -f -i {} {}@{} {}'.format(c['paths'].keyfile, self.user, self.ip, self.reboot_cmd))  
+    self.sleep(self.reboot_duration)
+  def show(self):
+    print('  ' + self.preferred_name)
+    for a in self._attributes:
+      if a == 'all_names':
+        print(item_template.format(a, ', '.join(getattr(self, a))))
+      else:
+        print(item_template.format(a, getattr(self, a)))
+    print('')
   def shutdown(self):
     self.addline('echo "shutting down {} ..."'.format(self.preferred_name))
-    self.addline('ssh -f -i {} {}@{} {}'.format(paths.keyfile, self.user, self.ip, self.shutdown_cmd))  
-    self.sleep(durations.shutdown)
-  def pdu_off(self):
-    if 'pdu_id' in self._attributes:
-      self.addline('echo "asserting \'pdu off\' for {} ..."'.format(self.preferred_name))
-      self.addline('snmpset -O qv -v 3 -a MD5 -A {0} -l authPriv -u pdu1 -x DES -X {0} {1} .1.3.6.1.4.1.318.1.1.4.4.2.1.3.{2} i 2'.format(pdu.password,pdu.ip,self.pdu_id))
-      self.sleep(durations.power_disruption)
-    else:
-      self.addline('echo "skipping \'pdu off\' for {}, as it is unconneted to pdu ..."'.format(self.preferred_name))
+    self.addline('ssh -f -i {} {}@{} {}'.format(c['paths'].keyfile, self.user, self.ip, self.shutdown_cmd))  
+    self.sleep(self.shutdown_duration)
   def sleep(self,seconds):
     self.addline('echo "sleeping {} seconds ..."'.format(seconds,))
     self.addline('sleep {}'.format(seconds,))
+  def unlock(self, direction):
+    self.addline('echo "removing {} lock for {} ..."'.format(direction, self.preferred_name))
+    self.addline('rm {}.{}'.format(os.path.join(c['paths'].lockdir, self.name), direction))
+  def uptime(self):
+    self.addline('echo "uptime of {} ..."'.format(self.preferred_name))
+    self.addline('ssh -f -i {} {}@{} {}'.format(c['paths'].keyfile, self.user, self.ip, self.uptime_cmd))
 
-for key in hosts_config.defaults():
-  setattr(Host, key, hosts_config['DEFAULT'][key])
-  Host._attributes.append(key)
+host = dict()
 for section in hosts_config.sections():
-  Host(section, hosts_config.items(section))
+  host[section] = Host(section, hosts_config.items(section))
 
 def lock(hn, direction):
-  Path(os.path.join(paths.lockdir, hn) + '.' + direction).touch()   
+  Path(os.path.join(c['paths'].lockdir, hn) + '.' + direction).touch()   
   
 def unlocked(hn, direction):
-  lockfile = os.path.join(paths.lockdir, hn) + '.' + direction
+  lockfile = os.path.join(c['paths'].lockdir, hn) + '.' + direction
   try:
     locktime = datetime.datetime.fromtimestamp(os.path.getmtime(lockfile))
   except FileNotFoundError:
     return True
-  if (datetime.datetime.now() - locktime).total_seconds() > durations.lock:
+  if (datetime.datetime.now() - locktime).total_seconds() > c['durations'].lock:
     return True
   else:
     return False
@@ -156,7 +174,7 @@ def unlocked(hn, direction):
 ####################################################################
 actions = OrderedDict([
   ('show',     'show host and action definitions'),
-  ('status',   'show host pdu, ping and uptime status'),
+  ('status',   'show host power outlet, ping and uptime status'),
   ('start',    'connect host to power and boot host'),
   ('reboot',   'reboot host regularly by a software command'),
   ('shutdown', 'shutdown host regularly by a software command'),
@@ -171,7 +189,7 @@ parser.add_argument(
   'action',
   help = '''one action to execute from the following list: {}. The
   word may be abbreviated. The match is done
-  case-insensitive. Type 'mctl show all' for further
+  case-insensitive. Type 'mctl -d show all' for further
   information'''.format(', '.join(actions.keys())),
 )
 all_host_names = 'all, ' + ', '.join([', '.join(h.all_names) for h in Host._instances])
@@ -183,9 +201,32 @@ parser.add_argument(
   word 'all' means all hosts. The match is done
   case-insensitive.""".format(all_host_names),
 )
+parser.add_argument(
+  '-V',
+  '--version',
+  action = 'version',
+  version = 'This is %(prog)s version ' + __version__ + '.',
+)
+parser.add_argument(
+  '-d',
+  '--debug',
+  action = 'store_const',
+  const = ' debug',
+  default = '',
+  help = 'turn on debug mode',
+)
+parser.add_argument(
+  '-n',
+  '--dry_run',
+  action = 'store_true',
+  help = "contact neither the target hosts nor the PDUs",
+)
 args = parser.parse_args()
 
+
+####################################################################
 ## determine action
+####################################################################
 re_nonalphanumeric = re.compile('[\W_]+', re.UNICODE)
 a2 = re_nonalphanumeric.sub('', args.action.casefold())
 hits = 0
@@ -194,28 +235,38 @@ for a in actions.keys():
     action = a
     hits += 1
 if not hits == 1:
-  log('Error: first command line argument \'{}\' doesn\'t match exactly one action, exiting ...'.format(a2), par = False)
+  log('Error: first command line argument \'{}\' doesn\'t match exactly one action, exiting ...'.format(a2), prepend = '')
   sys.exit(1)
+if action == 'show':
+    print('\nrequested host definitions')
 
+
+####################################################################
 ## determine hosts
+####################################################################
 hosts = []
+pdus = []
 for ah in args.host:
   ah2 = re_nonalphanumeric.sub('', ah.casefold())
   hits = 0
   if re.match(ah2, 'all', flags=re.IGNORECASE):
     hits += 1
     hosts = [h.name for h in Host._instances]
+    for h in Host._instances:
+      if not h.pdu in pdus:
+        pdus.append(h.pdu)
   for h in Host._instances:
     for n in h.all_names:
       if re.match(ah2, n, flags=re.IGNORECASE):
         hosts.append(h.name)
         h.preferred_name = n
+        if not h.pdu in pdus:
+          pdus.append(h.pdu)
         hits += 1
         break
   if not hits == 1:
-    log('Error: command line argument "{}" neither matches exactly one host nor the word \'all\', exiting ...'.format(ah), par = False)
+    log('Error: command line argument \'{}\' neither matches exactly one host nor the word \'all\', exiting ...'.format(ah), prepend = '')
     sys.exit(1)
-hosts = list(OrderedDict.fromkeys(hosts))
 
 
 ####################################################################
@@ -223,95 +274,114 @@ hosts = list(OrderedDict.fromkeys(hosts))
 ####################################################################
 u = 'upwards'
 d = 'downwards'
-for h in Host._instances:
-  for hn in hosts:
-    if hn == h.name:
-      h.addline('echo "Beginning of \'{}\' for host \'{}\':"'.format(action, h.preferred_name))
-      if action == 'show':
-        h.show()
-      elif action == 'status':
-        h.pdu()
-        h.ping()
-        h.uptime()
-      elif action == 'start':
-        if unlocked(hn, d):
-          h.lock(u)
-          h.pdu_on()
-          h.wol()
-          h.unlock(u)
-        else:
-          log('skipping \'{}\' for \'{}\' due to {} lock'.format(action, h.preferred_name, d))
-      elif action == 'reboot':
-        if unlocked(hn, d) and unlocked(hn, u):
-          h.lock(d)
-          h.lock(u)
-          h.reboot()
-          h.unlock(d)
-          h.unlock(u)
-        else:
-          log('skipping \'{}\' for \'{}\' due to {} or {} lock'.format(action, h.preferred_name, d, u))
-      elif action == 'shutdown':
-        if unlocked(hn, u):
-          h.lock(d)
-          h.shutdown()
-          h.unlock(d)
-        else:
-          log('skipping \'{}\' for \'{}\' due to {} lock'.format(action, h.preferred_name, u))
-      elif action == 'poweroff':
-        if unlocked(hn, u):
-          h.lock(d)
-          h.shutdown()
-          h.pdu_off()
-          h.unlock(d)
-        else:
-          log('skipping \'{}\' for \'{}\' due to {} lock'.format(action, h.preferred_name, u))
-      elif action == 'fix':
-        if unlocked(hn, u) and unlocked(hn, d):
-          h.lock(d)
-          h.shutdown()
-          h.pdu_off()
-          h.unlock(d)
-          h.lock(u)
-          h.pdu_on()
-          h.wol()
-          h.unlock(u)
-        else:
-          log('skipping \'{}\' for \'{}\' due to lock'.format(action, h.preferred_name))
-      else:
-        log('Error: forgotten action, exiting ...')
-        sys.exit(1)
-      h.addline('echo "End of \'{}\' for host \'{}\'."'.format(action, h.preferred_name))
+for hn in hosts:
+  h = host[hn]
+  h.addline('echo "Beginning of \'{}\' for host \'{}\':"'.format(action, h.preferred_name))
+  if action == 'show':
+    h.show()
+  elif action == 'status':
+    h.outlet_status()
+    h.ping()
+    h.uptime()
+  elif action == 'start':
+    if unlocked(hn, d):
+      h.lock(u)
+      h.outlet_on()
+      h.boot()
+      h.unlock(u)
+    else:
+      log('skipping \'{}\' for \'{}\' due to {} lock'.format(action, h.preferred_name, d))
+  elif action == 'reboot':
+    if unlocked(hn, d) and unlocked(hn, u):
+      h.lock(d)
+      h.lock(u)
+      h.reboot()
+      h.unlock(d)
+      h.unlock(u)
+    else:
+      log('skipping \'{}\' for \'{}\' due to {} or {} lock'.format(action, h.preferred_name, d, u))
+  elif action == 'shutdown':
+    if unlocked(hn, u):
+      h.lock(d)
+      h.shutdown()
+      h.unlock(d)
+    else:
+      log('skipping \'{}\' for \'{}\' due to {} lock'.format(action, h.preferred_name, u))
+  elif action == 'poweroff':
+    if unlocked(hn, u):
+      h.lock(d)
+      h.shutdown()
+      h.outlet_off()
+      h.unlock(d)
+    else:
+      log('skipping \'{}\' for \'{}\' due to {} lock'.format(action, h.preferred_name, u))
+  elif action == 'fix':
+    if unlocked(hn, u) and unlocked(hn, d):
+      h.lock(d)
+      h.lock(u)
+      h.shutdown()
+      h.outlet_off()
+      h.outlet_on()
+      h.boot()
+      h.unlock(d)
+      h.unlock(u)
+    else:
+      log('skipping \'{}\' for \'{}\' due to lock'.format(action, h.preferred_name))
+  else:
+    log('Error: forgotten action, exiting ...')
+    sys.exit(1)
+  h.addline('echo "End of \'{}\' for host \'{}\'."'.format(action, h.preferred_name))
 
   
 ####################################################################
 ## execute scripts
 ####################################################################
 if action == 'show':
-  print('\navailable actions:')
+  if args.debug:
+    print('\nrelated pdu definitions')
+    for section in pdus:
+      print('  ' + section)
+      for a in pdu[section]._attributes:
+        print(item_template.format(a, getattr(pdu[section], a)))
+      print('')
+  print('\navailable actions')
   for key, value in actions.items():
-    print('  {:15}: {}'.format(key, value))
+    print(item_template.format(key, value))
+  if args.debug:
+    print('''
+In our setup we have the host level and the power outlet level. The above-mentioned compound actions include all reasonable combinations of the atomic actions
+- turn on power outlet (if it is not on already)
+- turn on host (if it is not on already)
+- turn off host (if it is not off already)
+- turn off power outlet (if it is not off already)
+To turn on a host without turning on its power outlet before is not reasonable, for instance. The names of the actions may be misleading as - say - poweroff usually not includes disconnecting the host from power.''')
   log('End of MiMa Control Script')
   sys.exit(0)
 
 f = dict()   # temporary files for input and output
 p = dict()   # script processes
 j = 0        # script's serial number
-for h in Host._instances:
-  for hn in hosts:
-    if hn == h.name:
-      f[j] = tempfile.TemporaryFile(mode = 'w+b')
-#      print(h.script)
-      p[j] = subprocess.Popen(h.script, stdout = f[j], stderr = f[j], shell = True)
-      time.sleep(durations.pause)
-      j += 1
+for hn in hosts:
+  h = host[hn]
+  f[j] = tempfile.TemporaryFile(mode = 'w+b')
+  dlog(h.script)
+  if args.dry_run:
+    h.script = ''
+    h.addline('echo "Dry-run output of action \'{}\' on host \'{}\'.\n"'.format(action, h.preferred_name))
+  p[j] = subprocess.Popen(h.script, stdout = f[j], stderr = f[j], shell = True)
+  time.sleep(c['durations'].pause)
+  j += 1
 
 
 ####################################################################
 ## print output
 ####################################################################
+if args.dry_run:
+  time.sleep(c['durations'].pause)
 for k in range(j):
   print('')
-  p[k].wait()
+  if not args.dry_run:
+    p[k].wait()
   f[k].seek(0)
   print(f[k].read().decode('UTF-8'))
 
