@@ -17,7 +17,7 @@ config = configparser.ConfigParser()
 config.read_file(open(os.path.join(basedir, 'etc/config.ini')))
 pdus_config = configparser.ConfigParser()
 pdus_config.read_file(open(os.path.join(basedir, 'etc/pdus.ini')))
-hosts_config = configparser.ConfigParser()
+hosts_config = configparser.ConfigParser(defaults = {'exclude': 'no'})
 hosts_config.read_file(open(os.path.join(basedir, 'etc/hosts.ini')))
 
 
@@ -45,7 +45,7 @@ c = dict()
 for section in config.sections():
   c[section] = Config(section, config.items(section))
 
-# note the difference:
+# note the differences:
 # Pdu = class
 # pdu = dictionary of all Pdu objects
 # h.pdu = pdu attribute of host h
@@ -64,7 +64,7 @@ for section in pdus_config.sections():
 
 re_comma = re.compile(' *, *')
 item_template = '    {:17}: {}'
-# note the difference:
+# note the differences:
 # Host = class
 # host = dictionary of all Host objects
 # hosts = list of hostnames of the hosts given on the command line
@@ -87,7 +87,10 @@ class Host:
       if key == 'alternative names':
         self.all_names.extend(re.split(re_comma, value))
       else:
-        setattr(self, key, value)
+        if key == 'exclude':
+          setattr(self, key, hosts_config.getboolean(name, key))
+        else:
+          setattr(self, key, value)
         if not key in self._attributes:
           self._attributes.append(key)
     self.script = ''
@@ -198,7 +201,7 @@ parser.add_argument(
   nargs = '+',
   help = """host to execute the action on. A possibly
   abbreviated first word from the folling list: {}. The special
-  word 'all' means all hosts. The match is done
+  word 'all' means all non-excluded hosts. The match is done
   case-insensitive.""".format(all_host_names),
 )
 parser.add_argument(
@@ -249,20 +252,22 @@ pdus = []
 for ah in args.host:
   ah2 = re_nonalphanumeric.sub('', ah.casefold())
   hits = 0
-  if re.match(ah2, 'all', flags=re.IGNORECASE):
+  if re.match(ah2, 'all', flags = re.IGNORECASE):
     hits += 1
-    hosts = [h.name for h in Host._instances]
     for h in Host._instances:
-      if not h.pdu in pdus:
-        pdus.append(h.pdu)
-  for h in Host._instances:
-    for n in h.all_names:
-      if re.match(ah2, n, flags=re.IGNORECASE):
+      if (not h.exclude or action == 'show') and not h.name in hosts:
         hosts.append(h.name)
-        h.preferred_name = n
         if not h.pdu in pdus:
           pdus.append(h.pdu)
+  for h in Host._instances:
+    for n in h.all_names:
+      if re.match(ah2, n, flags = re.IGNORECASE):
         hits += 1
+        if not h.name in hosts:
+          hosts.append(h.name)
+          h.preferred_name = n
+          if not h.pdu in pdus:
+            pdus.append(h.pdu)
         break
   if not hits == 1:
     log('Error: command line argument \'{}\' neither matches exactly one host nor the word \'all\', exiting ...'.format(ah), prepend = '')
