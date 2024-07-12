@@ -28,7 +28,7 @@ and `hosts.sample.ini` to `hosts.ini`.
 Run `mctl --help` and `mctl show all` and edit the configuration
 files as needed.
 
-Configure a publickey ssh login to each target host and endow the
+Configure a public key ssh login to each target host and endow the
 user on the target host with permissions to execute the given
 shutdown command.
 
@@ -38,7 +38,7 @@ the source code.
 
 ## Advantages and Prospects
 
-This is a straightforward solution, wich is configurable and
+This is a straightforward solution, which is configurable and
 extensible. The hosts are handled simultaneously, while the
 output always uses their order from `hosts.ini`.
 
