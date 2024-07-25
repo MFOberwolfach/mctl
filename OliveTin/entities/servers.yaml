@@ -1,0 +1,41 @@
+- name: m1
+  state: started
+  hostname: m1
+  ip: 192.168.111.11
+  alias: Geometrie und Dynamik
+- name: m2
+  state: started
+  hostname: m2
+  ip: 192.168.111.12
+  alias: Mathematik des Planeten Erde
+- name: m3
+  state: started
+  hostname: m3
+  ip: 192.168.111.13
+  alias: Surfer
+- name: m4
+  state: started
+  hostname: m4
+  ip: 192.168.111.14
+  alias: Cinderella
+- name: m5
+  state: started
+  hostname: m5
+  ip: 192.168.111.15
+  alias: iOrnaments
+- name: m6
+  state: started
+  hostname: m6
+  ip: 192.168.111.16
+  alias: I am AI
+- name: m7
+  state: started
+  hostname: m7
+  ip: 192.168.111.17
+  alias: MFO Geschichte
+- name: m8
+  state: started
+  hostname: m8
+  ip: 192.168.111.18
+  alias: Mineralien
+
