@@ -39,8 +39,9 @@ the source code.
 
 Use OliveTin as a simple webinterface https://www.olivetin.app
 
-Copy the OliveTin Folder to `/etc/OliveTin` and adapt the configuration
-to your needs.
+Copy the OliveTin folder to `/etc/OliveTin` and adapt the configuration
+to your needs. Servers should be added to `entities/servers.yaml`.
+Configuration of the WebGui is done in `config.yaml`
 
 
 ## Advantages and Prospects
@@ -53,7 +54,7 @@ A thorough solution for controlling hosts would consist of
 
 - a data backend
 - a service
-- a web interface
+- a web interface (see OliveTin Webinterface option above)
 - a command line interface
 
 
