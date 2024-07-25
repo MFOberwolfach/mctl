@@ -214,7 +214,7 @@ def unlocked(hn, direction):
 
 
 ####################################################################
-## parse command line
+# parse command line
 ####################################################################
 actions = OrderedDict([
     ('show', 'show host and action definitions'),
@@ -303,10 +303,10 @@ for ah in args.host:
         for n in h.all_names:
             if re.match(ah2, n, flags=re.IGNORECASE):
                 hits += 1
-                if not h.name in hosts:
+                if h.name not in hosts:
                     hosts.append(h.name)
                     h.preferred_name = n
-                    if not h.pdu in pdus:
+                    if h.pdu not in pdus:
                         pdus.append(h.pdu)
                 break
     if not hits == 1:
