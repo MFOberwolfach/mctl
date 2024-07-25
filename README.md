@@ -35,6 +35,13 @@ shutdown command.
 Further adaptions are possible and may be necessary by editing
 the source code.
 
+## Webinterface
+
+Use OliveTin as a simple webinterface https://www.olivetin.app
+
+Copy the OliveTin Folder to `/etc/OliveTin` and adapt the configuration
+to your needs.
+
 
 ## Advantages and Prospects
 
